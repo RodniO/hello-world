@@ -18,9 +18,8 @@ intel_run:	intel
 intel:	$(exe_intel)
 
 $(exe_intel):	$(obj_intel)
-	$(compiler_intel) $(opt_intel) -o $(exe_intel) $(obj_intel) -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl
-#-Wl,--start-group ${MKLROOT}/lib/intel64/libmkl_intel_lp64.a ${MKLROOT}/lib/intel64/libmkl_sequential.a ${MKLROOT}/lib/intel64/libmkl_core.a -Wl,--end-group -lpthread -lm -ldl
-	
+	$(compiler_intel) $(opt_intel) -o $(exe_intel) $(obj_intel) -Wl,--start-group ${MKLROOT}/lib/libmkl_intel_lp64.a ${MKLROOT}/lib/libmkl_sequential.a ${MKLROOT}/lib/libmkl_core.a -Wl,--end-group -lpthread -lm -ldl
+#-lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl
 obj_intel/%.o:	$(source)/%.f90
 	$(compiler_intel) $(opt_intel) -c $< -o $@
 	

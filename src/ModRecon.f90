@@ -373,14 +373,9 @@ Module ModRecon
     Integer(4), intent(in) :: r
     Type(IntVec), intent(in) :: perm, perm2
     DOUBLE PRECISION coef2
-    Integer(4) i, j, nz, m, k
+    Integer(4) i, j, nz, k
     Type(IntVec) perm2i
 
-    if (t .eq. 1) then
-      m = this%m
-    else
-      m = this%n
-    end if
     perm2i = perm2%perminv()
     if (coef .ne. 1) then
       coef2 = coef - 1.0d0
@@ -421,6 +416,97 @@ Module ModRecon
       end if
     end if
   end
+  
+  !Replaces elements of the matrix according to sparse mask and step coef.
+  !For internal calls ONLY.
+  subroutine replacenoperm(this, srmat, scmat, coef, t, r, perm, perm2)
+    Type(Mtrx) :: this
+    Type(SparseRow), intent(in) :: srmat
+    Type(SparseCol), intent(in) :: scmat
+    DOUBLE PRECISION, intent(in) :: coef
+    Integer(4), intent(in) :: t
+    Integer(4), intent(in) :: r
+    Type(IntVec), intent(in) :: perm, perm2
+    DOUBLE PRECISION coef2
+    Integer(4) i, j, nz, k
+
+    if (coef .ne. 1) then
+      coef2 = coef - 1.0d0
+      if (t == 1) then
+        do i = 1, r
+          j = perm%d(i)
+          do nz = srmat%i(j), srmat%i(j+1)-1
+            k = srmat%j(nz)
+            this%d(i,k) = coef * srmat%d(nz) - coef2 * this%d(i,k)
+          end do
+        end do
+      else
+        do i = 1, r
+          j = perm%d(i)
+          do nz = scmat%j(j), scmat%j(j+1)-1
+            k = scmat%i(nz)
+            this%d(k,i) = coef * scmat%d(nz) - coef2 * this%d(k,i)
+          end do
+        end do
+      end if
+    else
+      if (t == 1) then
+        do i = 1, r
+          j = perm%d(i)
+          do nz = srmat%i(j), srmat%i(j+1)-1
+            k = srmat%j(nz)
+            this%d(i,k) = srmat%d(nz)
+          end do
+        end do
+      else
+        do i = 1, r
+          j = perm%d(i)
+          do nz = scmat%j(j), scmat%j(j+1)-1
+            k = scmat%i(nz)
+            this%d(k,i) = scmat%d(nz)
+          end do
+        end do
+      end if
+    end if
+  end
+  
+  !Replaces elements of the matrix according to sparse mask and step coef.
+  !For internal calls ONLY.
+  subroutine mulreplace(this, u, lcurmat, rcurmat, srmat, scmat, coef, t, r, perm, perm2)
+    Type(Mtrx) :: this
+    Type(Mtrx), intent(in) :: u
+    Type(Mtrx), intent(in) :: lcurmat
+    Type(Mtrx), intent(in) :: rcurmat
+    Type(SparseRow), intent(in) :: srmat
+    Type(SparseCol), intent(in) :: scmat
+    DOUBLE PRECISION, intent(in) :: coef
+    Integer(4), intent(in) :: t
+    Integer(4), intent(in) :: r
+    Type(IntVec), intent(in) :: perm, perm2
+    Integer(4) i, j, nz, k
+    
+    Double precision x
+
+      if (t == 1) then
+        do i = 1, r
+          j = perm%d(i)
+          do nz = srmat%i(j), srmat%i(j+1)-1
+            k = srmat%j(nz)
+            x = coef * (srmat%d(nz) - sum(lcurmat%d(i,:) * rcurmat%d(:,k)))
+            this%d(:,k) = this%d(:,k) + x * u%d(i,:)
+          end do
+        end do
+      else
+        do i = 1, r
+          j = perm%d(i)
+          do nz = scmat%j(j), scmat%j(j+1)-1
+            k = scmat%i(nz)
+            x = coef * (scmat%d(nz) - sum(lcurmat%d(k,:) * rcurmat%d(:,i)))
+            this%d(k,:) = this%d(k,:) + x * u%d(:,i)
+          end do
+        end do
+      end if
+  end
 
   !Approximation subroutine for reconstruction.
   !For internal calls ONLY.
@@ -441,7 +527,10 @@ Module ModRecon
     Double precision, intent(in) :: sq
     Double precision, intent(out) :: error
     Integer(4) st, tst, n, prevst, prevtst
-    Integer(4) i
+    Integer(4) i, j, k, pki, nz
+    
+    Type(Mtrx) lsub, rsub
+    Type(IntVec) permc, permo
     
     n = lcurmat%n
     call lcurmat%permrows(perm1, 1)
@@ -490,14 +579,47 @@ Module ModRecon
       maxswaps = 0
     end if
     
-    cs = lcurmat * rcurmat%subarray(r,r2)
-    call replace(cs, KnownSparse,KnownSparsec,sq,2,r2,perm2,perm1)
-    us = cs%subarray(r2, r2)
+    lsub = lcurmat%subarray(r2,r)
+    rsub = rcurmat%subarray(r,r2)
+    
+    call lcurmat%permrows(perm1, 2)
+    call rcurmat%permcols(perm2, 2)
+    
+    us = lsub * rsub
+    permc = perm2%subarray(r2)
+    call permo%perm(r2)
+    call permc%sort(permo)
+    call permc%permapp(permo, 1)
+    do i = 1, r2
+      j = perm1%d(i)
+      pki = 1
+      do nz = KnownSparse%i(j), KnownSparse%i(j+1)-1
+        k = KnownSparse%j(nz)
+        do while ((k > permc%d(pki)) .and. (pki < r2))
+          pki = pki + 1
+        end do
+        if (k == permc%d(pki)) then
+          us%d(i,permo%d(pki)) = sq * KnownSparse%d(nz) - (sq-1) * us%d(i,permo%d(pki))
+        end if
+      end do
+    end do
     call us%svd(u, s, v)
-    cs = cs .dT. v%subarray(r1, r2)
-    rs = lcurmat%subarray(r2,r) * rcurmat
-    call replace(rs, KnownSparse,KnownSparsec,sq,1,r2,perm1,perm2)
-    rs = (u%subarray(r2, r1) .dd. s%subarray(r1)) .Td. rs
+    
+    v = v%subarray(r1, r2)
+    cs = lcurmat * (rsub .dT. v)
+    call mulreplace(cs, v, lcurmat, rsub, KnownSparse, KnownSparsec, sq, 2, r2, perm2, perm1)
+    
+    !cs = lcurmat * rsub
+    !call replacenoperm(cs, KnownSparse,KnownSparsec,sq,2,r2,perm2,perm1)
+    !cs = cs .dT. v%subarray(r1, r2)
+    
+    u = u%subarray(r2, r1) .dd. s%subarray(r1)
+    rs = (u .Td. lsub) * rcurmat
+    call mulreplace(rs, u, lsub, rcurmat, KnownSparse, KnownSparsec, sq, 1, r2, perm1, perm2)
+    
+    !rs = lsub * rcurmat
+    !call replacenoperm(rs, KnownSparse,KnownSparsec,sq,1,r2,perm1,perm2)
+    !rs = (u%subarray(r2, r1) .dd. s%subarray(r1)) .Td. rs
     
     call cs%halfqr(u, tau1, cs1)
     call rs%halflq(rs1, tau2, v)
@@ -510,9 +632,7 @@ Module ModRecon
     
     lcurmat = cs%multq(u, tau1, 'L', 'D')
     rcurmat = rs%multq(v, tau2, 'R', 'U')
-    
-    call lcurmat%permrows(perm1, 2)
-    call rcurmat%permcols(perm2, 2)
+
   end
 
 end module

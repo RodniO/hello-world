@@ -181,7 +181,7 @@ end
 !Adaptive Cross. Improved code of Stanislav Stavtsev. Unlike versions by Stavtsev, Savostianov and Bebendorf,
 !uses rook pivoting instead of column pivoting, extends it to more starting columns and adaptive starting columns
 !and allows rho-locally maximum search.
-subroutine ACA(Afun, param, Ni, Nj, MaxRank, jpmax_, U, V, per, rho_, rel_err, abs_err, iNs_, jNs_)
+subroutine ACA(Afun, param, Ni, Nj, MaxRank, jpmax_, U, V, per, rho_, rel_err, rel_err_fro, abs_err, iNs_, jNs_, maxsteps)
   procedure(elem_fun) :: Afun !Function, returning elements of A
   Type(Mtrx), intent(in) :: param !Matrix parameters
   Integer(4), intent(in) :: Ni, Nj !Matrix sizes
@@ -191,8 +191,10 @@ subroutine ACA(Afun, param, Ni, Nj, MaxRank, jpmax_, U, V, per, rho_, rel_err, a
   Type(IntVec), intent(in) :: per !Permutation to select starting rows (should be random)
   Double precision, intent(in), optional :: rho_ !rho-locally maximum
   Double precision, intent(in), optional :: rel_err !Desired relative error
+  Double precision, intent(in), optional :: rel_err_fro !Desired (frobenius norm) relative error
   Double precision, intent(in), optional :: abs_err !Desired absolute error; Max(rel,abs) is chosen
   Type(IntVec), intent(out), optional :: iNs_, jNs_ !Used rows and columns indices
+  Integer(4), intent(in), optional :: maxsteps !Maximum steps
        
   Type(Mtrx) Up !Starting columns
   Integer(4) jpmax !jpmax used
@@ -215,8 +217,16 @@ subroutine ACA(Afun, param, Ni, Nj, MaxRank, jpmax_, U, V, per, rho_, rel_err, a
   !Currently not used, because too expensive
        
   Double precision, allocatable :: tmp_array(:,:) !For copying
+  Double precision, allocatable :: tmp_col(:)
   
   Integer(4) i, j, s !Indices
+       
+  Integer(4) steps
+  
+  Double precision sum_err_fro
+  !Double precision time, dsecnd
+       
+  sum_err_fro = 0.0d0
        
   if ((Ni <= 0) .or. (Nj <= 0) .or. (maxrank <= 0) .or. (jpmax_ < 0)) then
     print *, 'Input sizes to ACA should be positive!'
@@ -230,6 +240,12 @@ subroutine ACA(Afun, param, Ni, Nj, MaxRank, jpmax_, U, V, per, rho_, rel_err, a
       return
     end if
     rho = rho_
+  end if
+  
+  if (present(maxsteps)) then
+    if (.not.present(rho_)) then
+      rho = 1.0d0
+    end if
   end if
        
   if (present(abs_err)) then
@@ -266,6 +282,7 @@ subroutine ACA(Afun, param, Ni, Nj, MaxRank, jpmax_, U, V, per, rho_, rel_err, a
     Allocate(jPs(jpmax))
     call Up%init(Ni,jpmax)
   end if
+  Allocate(tmp_col(max(maxrank,jpmax)))
 
   KnC = .false.
   KpC = 0
@@ -298,7 +315,9 @@ subroutine ACA(Afun, param, Ni, Nj, MaxRank, jpmax_, U, V, per, rho_, rel_err, a
   do while (NSkel < MaxRank)
         
     !Number of skeletons to aproximate matrix
-    NSkel = NSkel + 1    
+    NSkel = NSkel + 1   
+    
+    steps = 0 
             
     !Choose new starting column if it was used
     if ((KpC(jN) > 0) .and. (Nskel > 1)) then
@@ -341,10 +360,12 @@ subroutine ACA(Afun, param, Ni, Nj, MaxRank, jpmax_, U, V, per, rho_, rel_err, a
                         
     !Update elements in starting columns
     if (NSkel > 1) then
+      tmp_col(:jpmax) = V%d(jPs(:jpmax),NSkel-1)
+      !call dger(Ni, jpmax, -1.0d0, U%d(:,NSkel-1), 1, tmp_col, 1, Up%d, Ni) !Slower
       do j = 1, jpmax
-        Up%d(:,j) = Up%d(:,j) - U%d(:,NSkel-1) * V%d(jPs(j),NSkel-1)
-        Up%d(iN,j) = 0
+        Up%d(:,j) = Up%d(:,j) - U%d(:,NSkel-1) * tmp_col(j)
       end do
+      Up%d(iN,:jpmax) = 0
     end if
 
     !Find the maximum element in starting columns
@@ -355,12 +376,21 @@ subroutine ACA(Afun, param, Ni, Nj, MaxRank, jpmax_, U, V, per, rho_, rel_err, a
     MaxElR = 0
     do while (abs(MaxElC) > rho*abs(MaxElR))
             
+      steps = steps + 1
+      if (present(maxsteps)) then
+        if (steps > maxsteps) then
+          exit
+        end if
+      end if
+            
       iN = s
             
       !Calculate elements in new row
       do j = 1, Nj
         V%d(j,NSkel) = Afun(iN,j,param)
       end do
+      !tmp_col(:NSkel-1) = U%d(iN,:NSkel-1)
+      !call dgemv('N', Nj, NSkel-1, -1.0d0, V%d, Nj, tmp_col, 1, 1.0d0, V%d(:,NSkel), 1) !Slower
       do j = 1, NSkel-1
         V%d(:,NSkel) = V%d(:,NSkel) - U%d(iN,j)*V%d(:,j)
       end do
@@ -398,6 +428,24 @@ subroutine ACA(Afun, param, Ni, Nj, MaxRank, jpmax_, U, V, per, rho_, rel_err, a
     if (present(rel_err)) then
       err_bound = max(err_bound, rel_err*abs(MaxElC))
     end if
+    if (present(rel_err_fro)) then
+!       sum_err_fro = sum_err_fro + sum(U%d(:,NSkel)**2)*sum(V%d(:,NSkel)**2)
+!       if (NSkel > 1) then
+!         call uvec%init(NSkel)
+!         call vvec%init(NSkel)
+!         call DGEMV ('T', Ni, NSkel-1, 1.0d0, U%d, Ni, U%d(:,NSkel), 1, 0.0d0, uvec%d, 1)
+!         call DGEMV ('T', Nj, NSkel-1, 1.0d0, V%d, Nj, V%d(:,NSkel), 1, 0.0d0, vvec%d, 1)
+!         do i = 1, NSkel-1
+!           uvec%d(i) = sum(U%d(:,NSkel)*U%d(:,i))
+!         end do
+!         do i = 1, NSkel-1
+!           vvec%d(i) = sum(V%d(:,NSkel)*V%d(:,i))
+!         end do
+!         sum_err_fro = sum_err_fro + 2*(uvec*vvec)
+!       end if
+!       err_bound = rel_err_fro*sum_err_fro/sqrt(dble(Ni-NSkel)*(Nj-Nskel))
+      err_bound = max(err_bound, rel_err_fro*sqrt(sum(U%d(:,NSkel)**2)/Ni*sum(V%d(:,NSkel)**2)/Nj/abs(MaxElC)))
+    end if
     if (NSkel > 1) then
       if (abs(MaxElC) < err_bound) then
         Nskel = NSkel-1
@@ -429,6 +477,7 @@ subroutine ACA(Afun, param, Ni, Nj, MaxRank, jpmax_, U, V, per, rho_, rel_err, a
     Allocate(tmp_array(Ni,NSkel))
     call dlacpy('A', Ni, NSkel, U%d, Ni, tmp_array, Ni)
     U = tmp_array
+    Deallocate(tmp_array)
     Allocate(tmp_array(Nj,NSkel))
     call dlacpy('A', Nj, NSkel, V%d, Nj, tmp_array, Nj)
     V = tmp_array
@@ -468,7 +517,7 @@ subroutine maxvol(Afun, M, N, rank, per1, per2, param, C, UR, maxsteps, maxswaps
   Type(Mtrx) RT !Transposed rows
   Type(Mtrx) URT !Transposed UR
   Integer(4) swapsmade1, swapsmade2 !Number of swaps in rows and columns
-  Integer(4) i
+  Integer(4) i, j
   
   if (present(pre)) then
     pre_ = pre
@@ -496,6 +545,12 @@ subroutine maxvol(Afun, M, N, rank, per1, per2, param, C, UR, maxsteps, maxswaps
       !else
       !  call C%cmaxvol(per1, swapsmade1, maxswaps, ABin = ABout)
       !end if
+      if (maxsteps == 1) then !Rewrite premaxvol in column format to avoid reallocation!!!
+        Deallocate(C%d)
+        Allocate(C%d(M,rank))
+        C%n = M
+        C%m = rank
+      end if
       swapsmade1 = rank
     else
       C = Acols(Afun, M, rank, per1, per2, param)
@@ -529,15 +584,19 @@ subroutine maxvol(Afun, M, N, rank, per1, per2, param, C, UR, maxsteps, maxswaps
       exit
     end if
   end do
-  !Rows should coincide with the rows of A, so we use peri
-  C = Acols(Afun, M, rank, peri, per2, param)
+  do i = 1, rank
+    do j = 1, M
+      C%d(j,i) = Afun(j,per2%d(i),param)
+    end do
+  end do
   if (present(CA) .and. ((swapsmade2 > 0) .or. ((i == 1) .and. (pre_)))) then
-    CA = Acols(Afun, M, rank, per1, per2, param)
+    !CA = Acols(Afun, M, rank, per1, per2, param)
+    CA = C%d(per1%d(:),:)
     Ahat = CA%subarray(rank, rank)
     call Ahat%halfqr(Q, tau, R)
     call dtrsm('R', 'U', 'N', 'N', CA%n, CA%m, 1.0d0, R%d, R%n, CA%d, CA%n)
   end if
-  UR = .T.URT
+  UR = .T.URT !Rewrite FAST CUR in column format to avoid extra transposes
   !We swap the columns back to make them coincide with the columns of A
   call UR%permcols(per2, 2)
   !Now our low-rank approximation is C \hat A^{-1} R = C*UR
@@ -722,13 +781,13 @@ subroutine maxvolproj(Afun, M, N, rank, k, l, per1, per2, param, C, UR, maxsteps
     Ahat = R%subarray(k,rank)
     R = Ahat .Id. R
     call R%umaxvol2(2, rank, l, per2, .true., Cout = CMout, Zout = Zout, Lout = Lout)
-    call R%dominantc(2, rank, l, per2, swapsmade2, maxswaps, CMout, Zout, Lout)
+    call R%dominantc(2, rank, l, per2, swapsmade2, maxswaps, CMout, Zout, Lout, rank)
   else
     C = Acols(Afun, M, l, per1, per2, param)
     Ahat = C%subarray(rank,l)
     C = C .dI. Ahat
     call C%umaxvol2(1, rank, k, per1, .true., Cout = CMout, Zout = Zout, Lout = Lout)
-    call C%dominantc(1, rank, k, per1, swapsmade2, maxswaps, CMout, Zout, Lout)
+    call C%dominantc(1, rank, k, per1, swapsmade2, maxswaps, CMout, Zout, Lout, rank)
   end if
   
 !Inverse through SVD of columns C: improve is not observable (need column diagram to see the difference)
